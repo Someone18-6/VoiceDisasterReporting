@@ -2,12 +2,88 @@
 import re
 import os
 import tempfile
+import sqlite3
+from datetime import datetime
 
 import streamlit as st
 from dotenv import load_dotenv
 from gnani.stt import GnaniSTTClient
 
 
+# --------------------------------------------------
+# 1. DATABASE CONFIGURATION
+# --------------------------------------------------
+
+DB_PATH = "disaster_reports.db"
+
+
+def init_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                language TEXT NOT NULL,
+                transcript TEXT NOT NULL,
+                incident_type TEXT NOT NULL,
+                affected_families TEXT NOT NULL,
+                required_supplies TEXT NOT NULL,
+                suggested_priority TEXT NOT NULL,
+                location TEXT NOT NULL,
+                verification_status TEXT NOT NULL
+                    DEFAULT 'Pending Verification'
+            )
+        """)
+
+
+def save_report(language, transcript, report):
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute("""
+            INSERT INTO reports (
+                created_at, language, transcript,
+                incident_type, affected_families,
+                required_supplies, suggested_priority,
+                location, verification_status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.now().astimezone().isoformat(timespec="seconds"),
+            language,
+            transcript,
+            str(report["Incident Type"]),
+            str(report["Affected Families"]),
+            str(report["Required Supplies"]),
+            str(report["Suggested Priority"]),
+            str(report["Location"]),
+            "Pending Verification"
+        ))
+
+        return cursor.lastrowid
+
+
+def get_saved_reports():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+
+        rows = conn.execute("""
+            SELECT id, created_at, language, transcript,
+                   incident_type, affected_families,
+                   required_supplies, suggested_priority,
+                   location, verification_status
+            FROM reports
+            ORDER BY id DESC
+        """).fetchall()
+
+        return [dict(row) for row in rows]
+
+
+# Create the database table if it doesn't exist.
+init_db()
+
+
+# --------------------------------------------------
+# 2. STREAMLIT CONFIGURATION
+# --------------------------------------------------
 
 load_dotenv()
 
@@ -18,6 +94,7 @@ st.set_page_config(
 )
 
 st.title("🚨 Voice-Based Disaster Reporting")
+
 st.write(
     "Report a disaster using your voice in your preferred language."
 )
@@ -29,10 +106,14 @@ if not api_key:
     st.stop()
 
 
+# --------------------------------------------------
+# 3. DISASTER INFORMATION EXTRACTION
+# --------------------------------------------------
 
 def analyze_report(transcript):
     text = transcript.lower().strip()
 
+    # Identify the incident type.
     incident_keywords = {
         "Flood": [
             "flood", "flooding", "baadh", "badh", "pravaah",
@@ -57,7 +138,7 @@ def analyze_report(transcript):
             incident_type = incident
             break
 
-
+    # Recognize numbers written as words.
     number_words = {
         "one": 1, "two": 2, "three": 3, "four": 4,
         "five": 5, "six": 6, "seven": 7, "eight": 8,
@@ -82,12 +163,20 @@ def analyze_report(transcript):
 
     for pattern in family_patterns:
         match = re.search(pattern, text)
+
         if match:
             value = match.group(1)
-            affected_families = int(value) if value.isdigit() else number_words.get(value, "Not specified")
+
+            if value.isdigit():
+                affected_families = int(value)
+            else:
+                affected_families = number_words.get(
+                    value, "Not specified"
+                )
+
             break
 
-    
+    # Identify required supplies.
     supply_keywords = {
         "Food": [
             "food", "meal", "meals", "ration",
@@ -119,6 +208,7 @@ def analyze_report(transcript):
     if not required_supplies:
         required_supplies = ["Not specified"]
 
+    # Suggest a priority for human verification.
     urgent_keywords = [
         "urgent", "immediately", "immediate", "emergency",
         "trapped", "severe", "critical",
@@ -143,6 +233,9 @@ def analyze_report(transcript):
     }
 
 
+# --------------------------------------------------
+# 4. LANGUAGE SELECTION
+# --------------------------------------------------
 
 language_options = {
     "English": "en-IN",
@@ -165,13 +258,14 @@ selected_language = st.selectbox(
 language = language_options[selected_language]
 
 
+# --------------------------------------------------
+# 5. AUDIO UPLOAD AND GNANI AI TRANSCRIPTION
+# --------------------------------------------------
 
 audio_file = st.file_uploader(
     "Upload a short voice recording",
     type=["wav", "mp3", "flac", "ogg", "m4a"]
 )
-
-
 
 if audio_file:
     st.audio(audio_file)
@@ -201,34 +295,16 @@ if audio_file:
 
             transcript = result["transcript"]
 
-            # Display the original transcript
-            st.divider()
-            st.subheader("🗣️ Transcribed Report")
-            st.write(transcript)
-
-            st.success("Voice transcription completed!")
-
-            # Extract disaster information
+            # Extract disaster information.
             report = analyze_report(transcript)
 
-            st.divider()
-            st.subheader("📋 Extracted Disaster Report")
+            # Store results across Streamlit reruns.
+            st.session_state["last_transcript"] = transcript
+            st.session_state["last_report"] = report
+            st.session_state["last_language"] = selected_language
+            st.session_state["saved_report_id"] = None
 
-            st.write("**Incident Type:**", report["Incident Type"])
-            st.write("**Affected Families:**", report["Affected Families"])
-            st.write("**Required Supplies:**", report["Required Supplies"])
-            st.write("**Suggested Priority:**", report["Suggested Priority"])
-            st.write("**Location:**", report["Location"])
-
-            st.warning(
-                "This is an automatically generated draft. "
-                "Verify the details and location with a human "
-                "before treating it as a confirmed incident."
-            )
-
-            st.info(
-                "This report has not been saved or submitted yet."
-            )
+            st.success("Voice transcription completed!")
 
         except Exception as error:
             st.error(
@@ -241,3 +317,172 @@ if audio_file:
         finally:
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
+
+
+# --------------------------------------------------
+# 6. DISPLAY TRANSCRIPTION AND EXTRACTED REPORT
+# --------------------------------------------------
+
+if (
+    st.session_state.get("last_transcript")
+    and st.session_state.get("last_report")
+):
+    transcript = st.session_state["last_transcript"]
+    report = st.session_state["last_report"]
+
+    st.divider()
+    st.subheader("🗣️ Transcribed Report")
+    st.write(transcript)
+
+    st.subheader("📋 Extracted Disaster Report")
+
+    st.write("**Incident Type:**", report["Incident Type"])
+    st.write("**Affected Families:**", report["Affected Families"])
+    st.write("**Required Supplies:**", report["Required Supplies"])
+    st.write("**Suggested Priority:**", report["Suggested Priority"])
+    st.write("**Location:**", report["Location"])
+
+    st.warning(
+        "This is an automatically generated draft. Verify the "
+        "details and location with a human before treating it "
+        "as a confirmed incident."
+    )
+
+    # --------------------------------------------------
+    # 7. SAVE REPORT TO SQLITE
+    # --------------------------------------------------
+
+    st.divider()
+    st.subheader("💾 Save Disaster Report")
+
+    st.write("Review the extracted details before saving.")
+
+    st.caption(
+        "Saving creates a local draft only. It does not notify "
+        "emergency services."
+    )
+
+    if st.session_state.get("saved_report_id") is None:
+        if st.button("Save Report to Database", type="primary"):
+            try:
+                report_id = save_report(
+                    st.session_state["last_language"],
+                    transcript,
+                    report
+                )
+
+                st.session_state["saved_report_id"] = report_id
+
+                st.success(
+                    f"Report #{report_id} saved successfully!"
+                )
+
+                st.rerun()
+
+            except Exception as error:
+                st.error("Could not save the report.")
+                st.caption(f"Error details: {error}")
+
+    else:
+        st.success(
+            f"Report #{st.session_state['saved_report_id']} "
+            "has already been saved."
+        )
+
+
+# --------------------------------------------------
+# 8. SAVED DISASTER REPORTS DASHBOARD
+# --------------------------------------------------
+
+st.divider()
+st.header("📊 Saved Disaster Reports")
+
+try:
+    saved_reports = get_saved_reports()
+
+    if saved_reports:
+        total_reports = len(saved_reports)
+        pending_reports = sum(
+            report["verification_status"] == "Pending Verification"
+            for report in saved_reports
+        )
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.metric("Total Reports", total_reports)
+
+        with col2:
+            st.metric("Pending Verification", pending_reports)
+
+        # Show a compact table without the full transcript.
+        dashboard_rows = [
+            {
+                "Report ID": row["id"],
+                "Created At": row["created_at"],
+                "Language": row["language"],
+                "Incident Type": row["incident_type"],
+                "Affected Families": row["affected_families"],
+                "Required Supplies": row["required_supplies"],
+                "Suggested Priority": row["suggested_priority"],
+                "Location": row["location"],
+                "Status": row["verification_status"]
+            }
+            for row in saved_reports
+        ]
+
+        st.dataframe(
+            dashboard_rows,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # Allow users to inspect each saved report.
+        st.subheader("🔎 View Report Details")
+
+        report_ids = [row["id"] for row in saved_reports]
+
+        selected_report_id = st.selectbox(
+            "Select a report",
+            options=report_ids,
+            format_func=lambda report_id: f"Report #{report_id}"
+        )
+
+        selected_report = next(
+            row for row in saved_reports
+            if row["id"] == selected_report_id
+        )
+
+        st.write("**Original Transcript:**")
+        st.write(selected_report["transcript"])
+
+        st.write("**Language:**", selected_report["language"])
+        st.write("**Incident Type:**", selected_report["incident_type"])
+        st.write(
+            "**Affected Families:**",
+            selected_report["affected_families"]
+        )
+        st.write(
+            "**Required Supplies:**",
+            selected_report["required_supplies"]
+        )
+        st.write(
+            "**Suggested Priority:**",
+            selected_report["suggested_priority"]
+        )
+        st.write("**Location:**", selected_report["location"])
+        st.write(
+            "**Verification Status:**",
+            selected_report["verification_status"]
+        )
+        st.write("**Created At:**", selected_report["created_at"])
+
+    else:
+        st.info(
+            "No reports saved yet. Transcribe a voice report "
+            "and save it to see it here."
+        )
+
+except Exception as error:
+    st.error("Could not load the saved reports dashboard.")
+    st.caption(f"Error details: {error}")
