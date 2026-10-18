@@ -8,11 +8,8 @@ from datetime import datetime
 import streamlit as st
 from dotenv import load_dotenv
 from gnani.stt import GnaniSTTClient
+from gnani.tts import GnaniTTSClient
 
-
-# --------------------------------------------------
-# 1. DATABASE CONFIGURATION
-# --------------------------------------------------
 
 DB_PATH = "disaster_reports.db"
 
@@ -77,13 +74,27 @@ def get_saved_reports():
         return [dict(row) for row in rows]
 
 
-# Create the database table if it doesn't exist.
+def update_verification_status(report_id, new_status):
+    allowed_statuses = ["Verified", "Rejected"]
+
+    if new_status not in allowed_statuses:
+        raise ValueError("Invalid verification status")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute("""
+            UPDATE reports
+            SET verification_status = ?
+            WHERE id = ?
+        """, (new_status, report_id))
+
+        return cursor.rowcount > 0
+
+
+
 init_db()
 
 
-# --------------------------------------------------
-# 2. STREAMLIT CONFIGURATION
-# --------------------------------------------------
+
 
 load_dotenv()
 
@@ -106,9 +117,9 @@ if not api_key:
     st.stop()
 
 
-# --------------------------------------------------
-# 3. DISASTER INFORMATION EXTRACTION
-# --------------------------------------------------
+
+
+
 
 def analyze_report(transcript):
     text = transcript.lower().strip()
@@ -233,6 +244,17 @@ def analyze_report(transcript):
     }
 
 
+# # STEP 2 TEST
+# test_transcript = (
+#     "There is a flood near the main road. "
+#     "Three families are affected. "
+#     "They need drinking water and food urgently."
+# )
+
+# test_result = analyze_report(test_transcript)
+# st.write("Extraction Test:", test_result)
+
+
 # --------------------------------------------------
 # 4. LANGUAGE SELECTION
 # --------------------------------------------------
@@ -294,7 +316,7 @@ if audio_file:
                 )
 
             transcript = result["transcript"]
-
+            
             # Extract disaster information.
             report = analyze_report(transcript)
 
@@ -397,16 +419,19 @@ if (
 st.divider()
 st.header("📊 Saved Disaster Reports")
 
+
 try:
     saved_reports = get_saved_reports()
 
     if saved_reports:
         total_reports = len(saved_reports)
+
         pending_reports = sum(
             report["verification_status"] == "Pending Verification"
             for report in saved_reports
         )
 
+        # Dashboard metrics
         col1, col2 = st.columns(2)
 
         with col1:
@@ -415,7 +440,7 @@ try:
         with col2:
             st.metric("Pending Verification", pending_reports)
 
-        # Show a compact table without the full transcript.
+        # Display saved reports in a table
         dashboard_rows = [
             {
                 "Report ID": row["id"],
@@ -426,7 +451,7 @@ try:
                 "Required Supplies": row["required_supplies"],
                 "Suggested Priority": row["suggested_priority"],
                 "Location": row["location"],
-                "Status": row["verification_status"]
+                "Status": row["verification_status"],
             }
             for row in saved_reports
         ]
@@ -434,10 +459,10 @@ try:
         st.dataframe(
             dashboard_rows,
             use_container_width=True,
-            hide_index=True
+            hide_index=True,
         )
 
-        # Allow users to inspect each saved report.
+        # View individual report details
         st.subheader("🔎 View Report Details")
 
         report_ids = [row["id"] for row in saved_reports]
@@ -445,7 +470,7 @@ try:
         selected_report_id = st.selectbox(
             "Select a report",
             options=report_ids,
-            format_func=lambda report_id: f"Report #{report_id}"
+            format_func=lambda report_id: f"Report #{report_id}",
         )
 
         selected_report = next(
@@ -453,35 +478,83 @@ try:
             if row["id"] == selected_report_id
         )
 
+        # Display report information
         st.write("**Original Transcript:**")
         st.write(selected_report["transcript"])
 
         st.write("**Language:**", selected_report["language"])
         st.write("**Incident Type:**", selected_report["incident_type"])
+
         st.write(
             "**Affected Families:**",
-            selected_report["affected_families"]
+            selected_report["affected_families"],
         )
+
         st.write(
             "**Required Supplies:**",
-            selected_report["required_supplies"]
+            selected_report["required_supplies"],
         )
+
         st.write(
             "**Suggested Priority:**",
-            selected_report["suggested_priority"]
+            selected_report["suggested_priority"],
         )
+
         st.write("**Location:**", selected_report["location"])
+
         st.write(
             "**Verification Status:**",
-            selected_report["verification_status"]
+            selected_report["verification_status"],
         )
+
         st.write("**Created At:**", selected_report["created_at"])
 
+        # Human verification section
+        st.divider()
+        st.subheader("🛡️ Human Verification")
+
+        current_status = selected_report["verification_status"]
+
+        if current_status == "Pending Verification":
+            col1, col2 = st.columns(2)
+
+            with col1:
+                if st.button(
+                    "✅ Mark as Verified",
+                    key=f"verify_{selected_report_id}",
+                ):
+                    updated = update_verification_status(
+                        selected_report_id, "Verified"
+                    )
+
+                    if updated:
+                        st.success("Report marked as Verified.")
+                        st.rerun()
+                    else:
+                        st.error("Could not update this report.")
+
+            with col2:
+                if st.button(
+                    "❌ Reject Report",
+                    key=f"reject_{selected_report_id}",
+                ):
+                    updated = update_verification_status(
+                        selected_report_id, "Rejected"
+                    )
+
+                    if updated:
+                        st.success("Report marked as Rejected.")
+                        st.rerun()
+                    else:
+                        st.error("Could not update this report.")
+
+        else:
+            st.info(
+                f"This report has already been marked as: {current_status}"
+            )
+
     else:
-        st.info(
-            "No reports saved yet. Transcribe a voice report "
-            "and save it to see it here."
-        )
+        st.info("No disaster reports have been saved yet.")
 
 except Exception as error:
     st.error("Could not load the saved reports dashboard.")
